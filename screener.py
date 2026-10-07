@@ -111,4 +111,75 @@ def fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50):
         clean_sym = sym if sym.endswith('.TO') else f"{sym}.TO"
         candidate_symbols.add(clean_sym)
 
-    print(f"--> Multi-threading yield checks for {len(candidate_symbols)} TS
+    print(f"--> Multi-threading yield checks for {len(candidate_symbols)} candidates...")
+    qualifying_stocks = []
+    
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(check_tsx_ticker, sym, start_date, end_date)
+            for sym in candidate_symbols
+        ]
+        for future in as_completed(futures):
+            res = future.result()
+            if res:
+                qualifying_stocks.append(res)
+
+    return qualifying_stocks
+
+def send_telegram_msg(bot_token, chat_id, msg):
+    """Sends plain text message to Telegram with automatic payload chunking."""
+    tg_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+
+    lines = msg.split('\n')
+    chunks = []
+    current_chunk = ""
+
+    for line in lines:
+        if len(current_chunk) + len(line) + 1 > 3500:
+            chunks.append(current_chunk)
+            current_chunk = line + "\n"
+        else:
+            current_chunk += line + "\n"
+
+    if current_chunk:
+        chunks.append(current_chunk)
+
+    for idx, chunk in enumerate(chunks, 1):
+        payload = {'chat_id': chat_id, 'text': chunk}
+        try:
+            res = requests.post(tg_url, json=payload, timeout=10)
+            print(f"Chunk {idx}/{len(chunks)} Telegram Delivery Code: {res.status_code}")
+            if res.status_code != 200:
+                print(f"Telegram Error Payload: {res.text}")
+        except Exception as e:
+            print(f"Telegram Post Exception: {e}")
+
+def main():
+    fmp_key = os.environ.get('FMP_API_KEY', '').strip()
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+
+    print("=== TSX EX-DIVIDEND SCREENER (TOP 50 - 30 DAY WINDOW) ===")
+
+    if not bot_token or not chat_id:
+        print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing.")
+        sys.exit(1)
+
+    raw_stocks = fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50)
+    start_date, end_date = get_date_window(days=30)
+
+    if not raw_stocks:
+        print("No dividend stocks found in window.")
+        no_stocks_msg = f"🇨🇦 TSX Ex-Dividend Report ({start_date} to {end_date}):\nNo TSX dividend stocks found going ex-dividend in the next 30 days."
+        send_telegram_msg(bot_token, chat_id, no_stocks_msg)
+        sys.exit(0)
+
+    df = pd.DataFrame(raw_stocks)
+    df = df.drop_duplicates(subset=['symbol'])
+    df_sorted = df.sort_values(by='yield', ascending=False).head(50)
+
+    formatted_rows = []
+    for idx, row in enumerate(df_sorted.to_dict('records'), 1):
+        sym_clean = html.escape(str(row['symbol']))
+        formatted_rows.append(
+            f"{idx}. {sym_clean} | Ex-Date: {row['ex_date']} |
