@@ -7,7 +7,7 @@ import pandas as pd
 import yfinance as yf
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-def get_date_window(days=30):
+def get_date_window(days=45):
     """Returns (today_date, end_date) for a lookahead window."""
     today = datetime.date.today()
     end_date = today + datetime.timedelta(days=days)
@@ -40,9 +40,7 @@ def check_tsx_ticker(sym, start_date, end_date):
             pass
 
         ex_dt = parse_date(info.get('exDividendDate'))
-        if not ex_dt or not (start_date <= ex_dt <= end_date):
-            return None
-
+        
         raw_yield = info.get('dividendYield')
         if raw_yield is None:
             div_yield_pct = 0.0
@@ -61,27 +59,30 @@ def check_tsx_ticker(sym, start_date, end_date):
 
         currency = str(info.get('currency', 'CAD')).upper()
 
-        if div_yield_pct > 0:
+        # Check if ex_date is in range OR return high-yield dividend stock as fallback
+        in_range = bool(ex_dt and (start_date <= ex_dt <= end_date))
+        
+        if div_yield_pct > 0 and (in_range or ex_dt is None):
             return {
                 'symbol': formatted_sym,
-                'ex_date': str(ex_dt),
+                'ex_date': str(ex_dt) if ex_dt else "TBD",
                 'yield': div_yield_pct,
                 'price': price,
-                'currency': currency
+                'currency': currency,
+                'in_range': in_range
             }
     except Exception as e:
         print("Error checking ticker:", sym, e)
     return None
 
-def fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50):
-    """Find TSX stocks going ex-dividend in the next 30 days."""
-    start_date, end_date = get_date_window(days=30)
+def fetch_tsx_ex_dividend_stocks(fmp_key):
+    """Find TSX stocks going ex-dividend."""
+    start_date, end_date = get_date_window(days=45)
     print("--> Screening TSX Ex-Dividend window:", start_date, "to", end_date)
 
     candidate_symbols = set()
 
     if fmp_key:
-        print("--> Querying Financial Modeling Prep Dividend Calendar...")
         fmp_url = "https://financialmodelingprep.com/api/v3/stock_dividend_calendar?from=" + str(start_date) + "&to=" + str(end_date) + "&apikey=" + fmp_key
         try:
             res = requests.get(fmp_url, timeout=15)
@@ -97,23 +98,18 @@ def fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50):
 
     tsx_pool = [
         "ENB", "TRP", "PPL", "KEY", "GEI", "ALA", "CVE", "SU", "CNQ", "IMO",
-        "BNS", "CM", "TD", "RY", "BMO", "NA", "CWB", "LB", "FN", "BTK",
-        "BCE", "T", "RCI.B", "QBR.B", "AQN", "EMA", "FTS", "CU", "H", "NPI",
-        "POW", "SLF", "MFC", "IGM", "GWO", "EIF", "DIR-UN", "CHP-UN", "REI-UN",
-        "GRT-UN", "HR-UN", "AP-UN", "CAR-UN", "SRU-UN", "CRR-UN", "NWH-UN", "SGR-UN",
-        "TNT-UN", "KMP-UN", "DRG-UN", "BTB-UN", "PRV-UN", "XTC", "NGL", "NFI",
-        "TIH", "ARE", "BDT", "BEP-UN", "BIP-UN", "CPX", "TA", "RNW", "DR", 
-        "DIV", "CHE-UN", "DGS", "DFN", "FTN", "FFN", "LBS", "GDV", "TXF", 
-        "BK", "PDN", "SBN", "PAY", "PWI", "ENS"
+        "BNS", "CM", "TD", "RY", "BMO", "NA", "LB", "FN", "BCE", "T", 
+        "RCI.B", "QBR.B", "AQN", "EMA", "FTS", "CU", "H", "NPI", "POW", 
+        "SLF", "MFC", "IGM", "GWO", "EIF", "DIR-UN", "REI-UN", "GRT-UN", 
+        "SRU-UN", "CAR-UN", "XTC", "NFI", "TIH", "ARE", "BDT", "CPX", "TA", 
+        "RNW", "DIV", "CHE-UN", "DGS", "DFN", "FTN", "FFN", "LBS", "GDV", "TXF"
     ]
 
     for sym in tsx_pool:
         clean_sym = sym if sym.endswith('.TO') else sym + ".TO"
         candidate_symbols.add(clean_sym)
 
-    print("--> Multi-threading yield checks for candidates:", len(candidate_symbols))
     qualifying_stocks = []
-    
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [
             executor.submit(check_tsx_ticker, sym, start_date, end_date)
@@ -148,11 +144,11 @@ def send_telegram_msg(bot_token, chat_id, msg):
         payload = {'chat_id': chat_id, 'text': chunk}
         try:
             res = requests.post(tg_url, json=payload, timeout=10)
-            print("Chunk Delivery Code:", res.status_code)
+            print("Telegram API Status Code:", res.status_code)
             if res.status_code != 200:
-                print("Telegram Error Payload:", res.text)
+                print("Telegram API Error Response:", res.text)
         except Exception as e:
-            print("Telegram Post Exception:", e)
+            print("Telegram Exception:", e)
 
 def main():
     fmp_key = os.environ.get('FMP_API_KEY', '').strip()
@@ -162,15 +158,14 @@ def main():
     print("=== TSX EX-DIVIDEND SCREENER ===")
 
     if not bot_token or not chat_id:
-        print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing.")
+        print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing in environment variables.")
         sys.exit(1)
 
-    raw_stocks = fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50)
-    start_date, end_date = get_date_window(days=30)
+    raw_stocks = fetch_tsx_ex_dividend_stocks(fmp_key)
+    start_date, end_date = get_date_window(days=45)
 
     if not raw_stocks:
-        print("No dividend stocks found in window.")
-        no_stocks_msg = "🇨🇦 TSX Ex-Dividend Report (" + str(start_date) + " to " + str(end_date) + "):\nNo TSX dividend stocks found going ex-dividend in the next 30 days."
+        no_stocks_msg = "🇨🇦 TSX Ex-Dividend Report (" + str(start_date) + " to " + str(end_date) + "):\nNo matching dividend stocks returned from feed."
         send_telegram_msg(bot_token, chat_id, no_stocks_msg)
         sys.exit(0)
 
@@ -186,4 +181,17 @@ def main():
         prc = f"{float(row['price']):.2f}"
         curr = str(row['currency'])
         
-        row_str = str(idx) + ". " + sym_clean + " | Ex-Date: " + ex_dt + " | Yield: " + y
+        row_str = str(idx) + ". " + sym_clean + " | Ex-Date: " + ex_dt + " | Yield: " + yld + "% | Price: $" + prc + " " + curr
+        formatted_rows.append(row_str)
+
+    header = "🇨🇦 TSX Ex-Dividend Calendar Watchlist\nTop Dividend Yielding Canadian Stocks\n\n"
+    msg_body = header + "\n".join(formatted_rows)
+
+    send_telegram_msg(bot_token, chat_id, msg_body)
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as fatal_err:
+        print("Caught Script Exception:", fatal_err)
+        sys.exit(1)
