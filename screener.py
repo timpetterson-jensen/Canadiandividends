@@ -33,7 +33,6 @@ def check_tsx_ticker(sym, start_date, end_date):
         formatted_sym = sym if sym.endswith('.TO') else f"{sym}.TO"
         tk = yf.Ticker(formatted_sym)
         
-        # Safely fetch info dict
         info = {}
         try:
             info = tk.info or {}
@@ -44,7 +43,6 @@ def check_tsx_ticker(sym, start_date, end_date):
         if not ex_dt or not (start_date <= ex_dt <= end_date):
             return None
 
-        # Safely extract dividend yield
         raw_yield = info.get('dividendYield')
         if raw_yield is None:
             div_yield_pct = 0.0
@@ -55,7 +53,6 @@ def check_tsx_ticker(sym, start_date, end_date):
             except (ValueError, TypeError):
                 div_yield_pct = 0.0
 
-        # Safely extract price
         raw_price = info.get('regularMarketPrice') or info.get('currentPrice') or info.get('previousClose') or 0.0
         try:
             price = float(raw_price)
@@ -83,7 +80,6 @@ def fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50):
 
     candidate_symbols = set()
 
-    # Strategy 1: FMP Dividend Calendar if API key is provided
     if fmp_key:
         print("--> Querying Financial Modeling Prep Dividend Calendar...")
         fmp_url = f"https://financialmodelingprep.com/api/v3/stock_dividend_calendar?from={start_date}&to={end_date}&apikey={fmp_key}"
@@ -99,7 +95,6 @@ def fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50):
         except Exception as e:
             print(f"FMP Request Exception: {e}")
 
-    # Strategy 2: Expanded High-Yield & Major TSX Dividend Stock Pool
     tsx_pool = [
         "ENB", "TRP", "PPL", "KEY", "GEI", "ALA", "CVE", "SU", "CNQ", "IMO",
         "BNS", "CM", "TD", "RY", "BMO", "NA", "CWB", "LB", "FN", "BTK",
@@ -146,3 +141,33 @@ def send_telegram_msg(bot_token, chat_id, msg):
         else:
             current_chunk += line + "\n"
     if current_chunk:
+        chunks.append(current_chunk)
+
+    for idx, chunk in enumerate(chunks, 1):
+        payload = {'chat_id': chat_id, 'text': chunk}
+        try:
+            res = requests.post(tg_url, json=payload, timeout=10)
+            print(f"Chunk {idx}/{len(chunks)} Telegram Delivery Code: {res.status_code}")
+            if res.status_code != 200:
+                print(f"Telegram Error Payload: {res.text}")
+        except Exception as e:
+            print(f"Telegram Post Exception: {e}")
+
+def main():
+    fmp_key = os.environ.get('FMP_API_KEY', '').strip()
+    bot_token = os.environ.get('TELEGRAM_BOT_TOKEN', '').strip()
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID', '').strip()
+
+    print("=== TSX EX-DIVIDEND SCREENER (TOP 50 - 30 DAY WINDOW) ===")
+
+    if not bot_token or not chat_id:
+        print("CRITICAL ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID missing.")
+        sys.exit(1)
+
+    raw_stocks = fetch_tsx_ex_dividend_stocks(fmp_key, target_count=50)
+    start_date, end_date = get_date_window(days=30)
+
+    if not raw_stocks:
+        print("No dividend stocks found in window.")
+        send_telegram_msg(
+            bot_token, chat_id,
